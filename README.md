@@ -12,7 +12,8 @@ http://15418.courses.cs.cmu.edu/spring2016/lectures (CMU parallel)
 https://github.com/coffeebeforearch (pretty solid GPU knowledge performance engineer)
 https://www.youtube.com/watch?v=3xfyiWhtvZw&list=PLxNPSjHT5qvtYRVdNN1yDcdSl39uHV_sU&index=4&ab_channel=CoffeeBeforeArch 
 
-https://github.com/NVIDIA/thrust 
+https://github.com/NVIDIA/cuda-samples
+https://github.com/NVIDIA/thrust (very important CUDA library, many code examples)
 
 https://github.com/PacktPublishing/Learn-CUDA-Programming (many deep learning examples)
 
