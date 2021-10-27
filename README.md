@@ -17,6 +17,11 @@ https://github.com/CoffeeBeforeArch/cuda_programming (CUDA)
 https://www.youtube.com/watch?v=a0V8KpLu7EY&list=PLxNPSjHT5qvugVNYwtQwnvSQyvlbzAML3&index=7&ab_channel=CoffeeBeforeArch (MPI tutorial)
 https://github.com/CoffeeBeforeArch/practical_parallelism_in_cpp (MPI tutorial)
 
+https://github.com/mpitutorial/mpitutorial 
+https://mpitutorial.com/tutorials/mpi-scatter-gather-and-allgather/ 
+https://mpitutorial.com/tutorials/mpi-reduce-and-allreduce/ 
+
+
 https://github.com/NVIDIA/cuda-samples
 https://github.com/NVIDIA/thrust (very important CUDA library, many code examples)
 
