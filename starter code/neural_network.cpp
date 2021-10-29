@@ -17,6 +17,11 @@ dW2 == gradient to update W2 == error introduced by W2
 dz1 = da1 % bpcache.a[0] % (1 - bpcache.a[0]);
 
 
+
+matrix multiplication optimize:
+
+
+
 */
 #include "neural_network.h"
 
@@ -349,6 +354,30 @@ void train(NeuralNetwork& nn, const arma::Mat<real>& X,
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 
+
+/*
+need to GPU every step in backprop !!!
+
+
+1. z1 = W1*x + b1
+2. a1 = sigmoid(z1)
+3. z2 = W2*a1 + b2 
+4. yc = a2 = softmax(z2)
+
+
+*/
+void parallel_feedforward(NeuralNetwork& nn, const arma::Mat<real>& X,
+                 struct cache& cache){
+  
+  gpu_ff_z1();
+  gpu_ff_a1();
+  gpu_ff_z2();
+  gpu_ff_yc();
+
+}
+
+
+
 /*
 need to GPU every step in backprop !!!
 
@@ -372,7 +401,23 @@ void parallel_backprop(NeuralNetwork& nn, const arma::mat& y, double reg,
 
 }
 
+/*
 
+
+
+
+
+MPI tutorial
+
+https://github.com/CoffeeBeforeArch/practical_parallelism_in_cpp/blob/master/mpi/mpi_hello_synchronize.cpp
+stanny 213 lecture 16-18 code
+
+
+
+
+
+
+*/
 
 
 
