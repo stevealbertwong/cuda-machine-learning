@@ -369,8 +369,7 @@ need to GPU every step in backprop !!!
 void parallel_feedforward(NeuralNetwork& nn, const arma::Mat<real>& X,
                  struct cache& cache){
   
-  gpu_ff_z1();
-  gpu_ff_a1();
+  gpu_ff_a1(); // mat mul + signmoid 
   gpu_ff_z2();
   gpu_ff_yc();
 

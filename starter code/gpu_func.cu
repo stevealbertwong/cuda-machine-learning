@@ -45,16 +45,109 @@ GPU version of feed forward
 /*
 
 tiled matrix multiplication
+
+nick
 https://www.youtube.com/watch?v=3xfyiWhtvZw&list=PLxNPSjHT5qvtYRVdNN1yDcdSl39uHV_sU&index=4&ab_channel=CoffeeBeforeArch 
 https://github.com/CoffeeBeforeArch/cuda_programming/blob/master/02_matrix_mul/tiled/mmul.cu 
 https://github.com/CoffeeBeforeArch/from_scratch/blob/master/matrixMul/matrix_mul.cu 
 
+learn cuda
+https://github.com/PacktPublishing/Learn-CUDA-Programming/blob/master/Chapter07/07_parallel_programming_pattern/01_sgemm_optimization/sgemm.cu 
 
+learn CUDA version
 
+C: output matrix
+A, B: input matrix
+M: height of matrix
+N: width of matrix
+K: total no. of tiles across x/y axis 
 */
-void gpu_ff_z1(){
+__global__
+void gpu_ff_a1(){
+    /*
+    GPU blocks, threads within a grid diagram
+    */
+    int bid_x = blockIdx.x * blockDim.x; // block's x axis within 1 grid
+    int bid_y = blockIdx.y * blockDim.y;
+    int tid_x = threadIdx.x; // thd's x axis within 1 block
+    int tid_y = threadIdx.y;
+    int row = bid_y + tid_y; // global row index == row this thread is in
+    int col = bid_x + tid_x;
 
+    float element_c = 0.f;
+    
+    // 1 tile == 1 shared memory size == 1 block of threads
+    // all threads fully utilized within the block
+    __shared__ float s_tile_A[BLOCK_DIM][BLOCK_DIM];
+    __shared__ float s_tile_B[BLOCK_DIM][BLOCK_DIM];
+
+    /*    
+    
+    each for loop:    
+    - copy 1 tile of data from global(a, b) to shared memory/tile (s_a, s_b)
+        - then each thread uses diff combination of orange lines to compute its element in output matrix
+        - only 1 tile share of orange lines + 1 tile share of element is computed each loop
+    - matrix A (left to right), B (up to down), 1 tile at 1 time
+        - thread of s_tile_A element traverse col of matrix A 1 tile at 1 time (left to right)
+        - thread of s_tile_B element traverse row of matrix B 1 tile at 1 time (up to down)
+    - carve out the exact tile from global memory matrix A, B to block private s_tile_A, s_tile_B
+        - carve out 1 tile from A, 1 tile from B, transfer to s_tiles
+        - s_tiles == block private == each block has its own s_tile
+            - like each thread has its tid == wont overwrite each other
+        - ordered by warp (32 threads at 1 time), i.e. each tile is transfer warp by warp 
+        - inter-warps are not in order, BUT sync in order by __syncthreads()
+
+    each thread is responsible for 1 orange element (element_c) in output matrix 
+    - each thread will loop thru A's row n B's col orange line, tile by tile, element by element 
+    - element_c == thread private == wont overwrite by any other thread 
+
+    k == tile, K == num_tiles, tile_size == BLOCK_DIM 
+    */
+
+    // looping over 1 tile at 1 time across matrix, A left to right, B up to down 
+    for (int k = 0; k < K; k += BLOCK_DIM) 
+    {
+        /*
+        PART I:
+
+        focus on s_tile_A, s_tile_B to visualize what each block of threads are doing !!!!!
+        s_tile_A == block private
+
+        each block of threads carve out the exact tile from global memory matrix A, B to block private s_tile_A, s_tile_B        
+        each thread reponsible for 1 element in 1 tile, it goes to the exact element in global matrix
+
+        weird looking since matrix is represented as vector 
+        */
+        s_tile_A[tid_y][tid_x] = A[ (row * K) + k + tid_x) ]; // global row index + tile_id in this loop + tid
+        s_tile_B[tid_y][tid_x] = B[ (k*BLOCK_DIM + tid_y) * N + col ]; 
+        
+        // 1 tile from A, 1 tile from B, done transfered to s_tiles warp by warp 
+        __syncthreads();
+
+
+        /*
+        PART II:
+
+        focus on element_c to visualize what each thread is doing !!!!!
+        element_c == thread private
+
+        each thread within 1 block/tile, each compute its output matrix's element
+        each thread == diff combination of orange line
+        */
+        for (int e = 0; e < BLOCK_DIM; e++) // looping over elements wihtin 1 tile
+            element_c += s_tile_A[tid_y][e] * s_tile_B[e][tid_x]; 
+
+	  // wait for all threads to finish using current tiles before loading in new ones    
+	  __syncthreads();
+    }
+
+    // write result from GPU back to CPU
+    // element_c == thread private == designated 1 pos in output matrix from the get go
+    C[row * N + col] = (1.0 + std::exp(-element_c));
+      
 }
+
+
 
 
 
