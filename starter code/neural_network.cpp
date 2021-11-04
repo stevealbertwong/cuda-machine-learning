@@ -364,49 +364,59 @@ void train(NeuralNetwork& nn, const arma::Mat<real>& X,
 /*
 need to GPU every step in backprop !!!
 
-
 1. z1 = W1*x + b1
 2. a1 = sigmoid(z1)
 3. z2 = W2*a1 + b2 
 4. yc = a2 = softmax(z2)
 
-
+1 block/tile == num_features
 */
-void gpu_feedforward(NeuralNetwork& nn, const arma::Mat<real>& X,
-                 struct cache& cache){
+void gpu_feedforward(GPUData& GPU_data){
   
-  gpu_ff_a1(); // mat mul + signmoid 
-  gpu_ff_z2();
-  gpu_ff_yc();
+  // 1. z1 = W1*x + b1
+  // 2. a1 = sigmoid(z1)
+  gpu_ff_a1(GPU_data.W1, GPU_data.X, GPU_data.b1, GPU_data.A1, GPU_data.num_neurons, GPU_data.final_process_share, GPU_data.num_features); // mat mul + sigmoid 
+  // 3. z2 = W2*a1 + b2 
+  // 4. yc = a2 = softmax(z2)
+  gpu_ff_yc(GPU_data.W2, GPU_data.A1, GPU_data.b2, GPU_data.A2, GPU_data.num_classes, GPU_data.final_process_share, GPU_data.num_neurons); // mat mul + softmax
 
 }
-
 
 
 /*
 need to GPU every step in backprop !!!
 
-
 1. diff = 1/N * (yc - y)
-2. gradient dW2 = diff * a1.T + reg * W2
-3. 
+2. dW2 = diff * a1.T + reg * W2 // multiply gate
+3. db2 = arma::sum(diff, 1); // add gate
+4. da1 = nn.W[1].t() * diff; // t() == transpose()
+5. dz1 = da1 % bpcache.a[0] % (1 - bpcache.a[0]); // sigmoid gate
+6. dW1 = dz1 * bpcache.X.t() + reg * nn.W[0];
+7. db1 = arma::sum(dz1, 1);
 
 */
-void gpu_backprop(NeuralNetwork& nn, const arma::mat& y, double reg,
-              const struct cache& bpcache, struct grads& bpgrads){
-
-  gpu_bp_diff();
+void gpu_backprop(GPUData GPU_data, double regularization, int num_processes){
+  // backprop shared by no. GPU cores 
+  const double normalizer = 1.0 / ((double)N * num_procs);
+  const double reg_normalizer = reg / (double)num_procs;
   
-  gpu_bp_dW2()
-  gpu_bp_db2()
-  gpu_bp_da1()
-  gpu_bp_dz1()
-  gpu_bp_dW1()
-  gpu_bp_db1()
+  gpu_bp_diff(GPU_data.yh, GPU_data.y, GPU_data.y_diff, normalizer, -normalizer, GPU_data.num_classes, GPU_data.final_process_share);
+  
+  gpu_bp_dW2(GPU_data.diff, GPU_data.a1, GPU_data.dW2, 1.0, reg_normalizer, GPU_data.num_classes, GPU_data.num_neurons, GPU_data.final_process_share);
+  gpu_bp_db2(GPU_data.diff, GPU_data.db2, GPU_data.num_classes, GPU_data.final_process_share);
+  gpu_bp_da1(GPU_data.W2, GPU_data.diff, GPU_data.da1, 1.0, 0.0, GPU_data.num_neurons, GPU_data.final_process_share, GPU_data.num_classes);
+  gpu_bp_dz1(GPU_data.a1, GPU_data.da1, GPU_data.dz1, GPU_data.num_neurons, GPU_data.final_process_share);
+  gpu_bp_dW1(GPU_data.dz1, GPU_data.X, GPU_data.dW1, 1.0, reg_normalizer, GPU_data.num_neurons, GPU_data.num_features, GPU_data.final_process_share );
+  gpu_bp_db1(GPU_data.dz1, GPU_data.db1, GPU_data.num_neurons, GPU_data.final_process_share);
 
 }
 
-void gpu_gradientdescent(){
+void gpu_gradientdescent(GPUData GPU_data, double learning_rate){
+
+  gpu_grad_update(GPU_data.dW1, GPU_data.W1, learning_rate, GPU_data.num_neurons, GPU_data.num_features);
+  gpu_grad_update(GPU_data.db1, GPU_data.b1, learning_rate, GPU_data.num_neurons, GPU_data.final_process_share);
+  gpu_grad_update(GPU_data.dW2, GPU_data.W2, learning_rate, GPU_data.num_classes, GPU_data.num_neurons);
+  gpu_grad_update(GPU_data.db2, GPU_data.b2, learning_rate, GPU_data.num_classes, GPU_data.final_process_share);
 
 }
 
@@ -577,11 +587,12 @@ void parallel_train(NeuralNetwork& nn, const arma::Mat<real>& X,
 
       */
      
-     int batch_index = batch * batch_size; // 4 GPU core can only deal w portion of batch each loop
-     int process_share = batch_size/num_procs; // depending no. of process, each ps might compute many batches
-     int last_process_share = (N - batch_index)/num_procs; // last ps likely get less share of work
-     int final_process_share = std::min(process_share, last_process_share); 
-     
+      int batch_index = batch * batch_size; // 4 GPU core can only deal w portion of batch each loop
+      int process_share = batch_size/num_procs; // depending no. of process, each ps might compute many batches
+      int last_process_share = (N - batch_index)/num_procs; // last ps likely get less share of work
+      int final_process_share = std::min(process_share, last_process_share); 
+      GPU_data.final_process_share = final_process_share;
+
       MPI_SAFE_CALL(
           MPI_Scatter( 
               X.colptr(batch_index), /* start of matrix to send. */ // memptr() ?? 
@@ -623,9 +634,9 @@ void parallel_train(NeuralNetwork& nn, const arma::Mat<real>& X,
       checkCudaErrors(cudaMemcpy(GPU_data.W2, nn.W[1].memptr(), sizeof(double) * num_neurons * num_classes, cudaMemcpyHostToDevice));
       checkCudaErrors(cudaMemcpy(GPU_data.b2, nn.b[1].memptr(), sizeof(double) * num_classes, cudaMemcpyHostToDevice));
 
-      gpu_feedforward(GPU_data, final_process_share, nn);
+      gpu_feedforward(GPU_data);
 
-      gpu_backprop(GPU_data, final_process_share, reg, nn, num_procs);
+      gpu_backprop(GPU_data, reg, num_procs);
 
       // GPU to CPU
       checkCudaErrors(cudaMemcpy(CPU_data.dW1, GPU_data.dW1, sizeof(double) * num_features * num_neurons, cudaMemcpyDeviceToHost));

@@ -130,13 +130,13 @@ public:
     double* dA1; 
     double* dZ1;
 
-    int batch_size, num_pixels, num_neurons, num_classes;
+    int batch_size, num_pixels, num_neurons, num_classes, final_process_share;
 
     // constructor
     GPUData(int batch_size, int num_features, int num_neurons, int num_classes) : batch_size(batch_size), num_features(num_features), num_neurons(num_neurons), num_classes(num_classes) {
       cudaMalloc((void **) &X,    sizeof(double) * batch_size * num_featuresP);
       cudaMalloc((void **) &y,    sizeof(double) * batch_size * num_classes);
-      cudaMalloc((void **) &yh,   sizeof(double) * batch_size * num_classes);
+      cudaMalloc((void **) &yh,   sizeof(double) * batch_size * num_classes); /* guessed y */
       cudaMalloc((void **) &A1,   sizeof(double) * batch_size * num_neurons);
       cudaMalloc((void **) &dA1,  sizeof(double) * batch_size * num_neurons);
       cudaMalloc((void **) &Z1,   sizeof(double) * batch_size * num_neurons);
@@ -151,7 +151,7 @@ public:
       cudaMalloc((void **) &db1,  sizeof(double) * num_neurons); 
       cudaMalloc((void **) &b2,   sizeof(double) * num_classes);
       cudaMalloc((void **) &db2,  sizeof(double) * num_classes);
-      cudaMalloc((void **) &y_diff, sizeof(double) * batch_size * num_classes);
+      cudaMalloc((void **) &y_diff, sizeof(double) * batch_size * num_classes); /* y - guessed y */
     }
 
     ~device_cache() {

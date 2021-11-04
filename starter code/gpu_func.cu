@@ -25,25 +25,10 @@ https://github.com/PacktPublishing/Learn-CUDA-Programming/blob/master/Chapter10/
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 /*
-Routine to perform an in-place GEMM operation, i.e., C := alpha*A*B + beta*C
-*/
-int myGEMM(real* __restrict__ A, real* __restrict__ B,
-           real* __restrict__ C, real* alpha, real* beta,
-           int M, int N, int K) {
-  // TODO
-  return 0;
-}
-
-/* Helper functions for neural networks */
-
-
-
-/*
 GPU version of feed forward 
 */
 
 /*
-
 tiled matrix multiplication
 
 nick
@@ -56,14 +41,15 @@ https://github.com/PacktPublishing/Learn-CUDA-Programming/blob/master/Chapter07/
 
 learn CUDA version
 
-C: output matrix
-A, B: input matrix
-M: height of matrix
-N: width of matrix
+A, B: input matrix (X, W1)
+C: b1 matrix
+D: output matrix placeholder (A1)
+M: height of output matrix
+N: width of output matrix
 K: total no. of tiles across x/y axis 
 */
 __global__
-void gpu_ff_a1(){
+void gpu_ff_a1_kernel(double* __restrict__ A, double* __restrict__ B, double* __restrict__ C, double* __restrict__ D, int M, int N, int K){
     /*
     GPU blocks, threads within a grid diagram
     */
@@ -74,12 +60,12 @@ void gpu_ff_a1(){
     int row = bid_y + tid_y; // global row index == row this thread is in
     int col = bid_x + tid_x;
 
-    float element_c = 0.f;
+    double thread_element_sum = 0.f;
     
     // 1 tile == 1 shared memory size == 1 block of threads
     // all threads fully utilized within the block
-    __shared__ float s_tile_A[BLOCK_DIM][BLOCK_DIM];
-    __shared__ float s_tile_B[BLOCK_DIM][BLOCK_DIM];
+    __shared__ double s_tile_A[BLOCK_DIM][BLOCK_DIM];
+    __shared__ double s_tile_B[BLOCK_DIM][BLOCK_DIM];
 
     /*    
     
@@ -97,9 +83,9 @@ void gpu_ff_a1(){
         - ordered by warp (32 threads at 1 time), i.e. each tile is transfer warp by warp 
         - inter-warps are not in order, BUT sync in order by __syncthreads()
 
-    each thread is responsible for 1 orange element (element_c) in output matrix 
+    each thread is responsible for 1 orange element (thread_element_sum) in output matrix 
     - each thread will loop thru A's row n B's col orange line, tile by tile, element by element 
-    - element_c == thread private == wont overwrite by any other thread 
+    - thread_element_sum == thread private == wont overwrite by any other thread 
 
     k == tile, K == num_tiles, tile_size == BLOCK_DIM 
     */
@@ -128,26 +114,124 @@ void gpu_ff_a1(){
         /*
         PART II:
 
-        focus on element_c to visualize what each thread is doing !!!!!
-        element_c == thread private
+        focus on thread_element_sum to visualize what each thread is doing !!!!!
+        thread_element_sum == thread private
 
         each thread within 1 block/tile, each compute its output matrix's element
         each thread == diff combination of orange line
         */
         for (int e = 0; e < BLOCK_DIM; e++) // looping over elements wihtin 1 tile
-            element_c += s_tile_A[tid_y][e] * s_tile_B[e][tid_x]; 
+            thread_element_sum += s_tile_A[tid_y][e] * s_tile_B[e][tid_x]; 
 
 	  // wait for all threads to finish using current tiles before loading in new ones    
 	  __syncthreads();
     }
 
-    // write result from GPU back to CPU
-    // element_c == thread private == designated 1 pos in output matrix from the get go
-    C[row * N + col] = (1.0 + std::exp(-element_c));
-      
+    // write result from GPU share memory back to GPU global memory
+    // thread_element_sum == thread private == designated 1 pos in output matrix from the get go
+    // a1 = sigmoid(W1*x + b1)
+    D[row * N + col] = (1.0 + std::exp(-thread_element_sum + C[row * N + col] ));      
+}
+
+void gpu_ff_a1(double* __restrict__ A, double* __restrict__ B, double* __restrict__ C, double* __restrict__ D, int M, int N, int K){
+  dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+  const unsigned int grid_x = ceil(M / (float)block.x);
+  const unsigned int grid_y = ceil(N / (float)block.y);
+  dim3 grid(grid_x, grid_y);
+
+  gpu_GEMMSigmoid<<<grid, block>>>(A, B, C, D, M, N, K);
 }
 
 
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+/*
+A: W2
+B: A1
+C: b2
+D: A2
+M: num_classes
+N: final_process_share
+K: num_neurons
+*/
+__global__
+void gpu_ff_yc_kernel(double* A, double* B, double* C, double* D, const int M, const int N, const int K){
+    // tiled matrix multiplication
+    int bid_x = blockIdx.x * blockDim.x; // block's x axis within 1 grid
+    int bid_y = blockIdx.y * blockDim.y;
+    int tid_x = threadIdx.x; // thd's x axis within 1 block
+    int tid_y = threadIdx.y;
+    int row = bid_y + tid_y; // global row index == row this thread is in
+    int col = bid_x + tid_x;
+
+    double thread_element_sum = 0.f;
+    
+    __shared__ double s_tile_A[BLOCK_DIM][BLOCK_DIM];
+    __shared__ double s_tile_B[BLOCK_DIM][BLOCK_DIM];
+
+    for (int k = 0; k < K; k += BLOCK_DIM) 
+    {
+        s_tile_A[tid_y][tid_x] = A[ (row * K) + k + tid_x) ]; // global row index + tile_id in this loop + tid
+        s_tile_B[tid_y][tid_x] = B[ (k*BLOCK_DIM + tid_y) * N + col ]; 
+        
+        __syncthreads();
+
+        for (int e = 0; e < BLOCK_DIM; e++) 
+            thread_element_sum += s_tile_A[tid_y][e] * s_tile_B[e][tid_x]; 
+
+	  
+	  __syncthreads();
+    }
+    D[row * N + col] = C[row * N + col] - thread_element_sum; 
+
+    // softmax == summing whole matrix + element wise division
+    // M == no. classes of D
+    // N == final process share of D
+    const unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < N) {
+        double sum = 0.0;
+        for (size_t c = 0; c < M; ++c) { // iterate all classes
+            const unsigned int index = M * col + c;
+            D[index] = std::exp(D[index]);
+            sum += D[index];
+        }
+        for (size_t c = 0; c < M; ++c) {
+            const unsigned int index = M * col + c;
+            D[index] /= sum;
+        }
+    }
+}
+
+
+void gpu_ff_yc(double* A, double* B, double* C, double* D, const int M, const int N, const int K){
+  dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+
+  const unsigned int grid_x = ceil(M / (float)block.x);
+  const unsigned int grid_y = ceil(N / (float)block.y);
+  dim3 grid(grid_x, grid_y);
+
+  gpu_GEMM<<<grid, block>>>(A, B, C, D, M, N, K);
+  return 0;
+}
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
 
 
 
@@ -156,9 +240,7 @@ void gpu_ff_a1(){
 https://www.youtube.com/watch?v=dJNiHydmVjY&list=PLAtMgFDMfGy2mysjPHN_d1cf9sR1muRkq&index=9&ab_channel=EricDarve 
 https://github.com/PacktPublishing/Learn-CUDA-Programming/blob/master/Chapter02/02_memory_overview/04_matrix_transpose/conflict_solved.cu
 
-stanny 213 lecture 9 code
-
-stanny CME 213 version
+stanny CME 213 tutorial version
 */
 __global__
 void gpu_transpose(int* array_in, int* array_out, size_t n_rows, size_t n_cols) {
@@ -237,27 +319,37 @@ GPU version of backprop
 GPU version:
 diff = 1/N * (yc - y)
 
-N == int == y.n_cols
-yc == arma::mat == a2
-y == arma::mat 
+yh - y = y_diff
 
+A: yh
+B: y
+C: y_diff
+M: num_classes
+N: final_process_share == y.n_cols
 
-GPU accelerated:
-element wise matrix multiplication 
+GPU accelerated: 
 element wise matrix diff 
-
 */
-int gpu_bp_diff(const struct cache& bpcache, arma::mat y){
-
-}
-
 
 __global__
-void gpu_bp_diff_kernel(){
+void gpu_bp_diff_kernel(const double* __restrict__ A, const double* __restrict__ B, double* __restrict__ C, const double alpha, const double beta, const int M, const int N){
   int row = blockIdx.x * blockDim.x + threadIdx.x;
   int col = blockIdx.y * blockDim.y + threadIdx.y;
-
+  if (row < M && col < N) {
+    C[M * col + row] = alpha * A[M * col + row] + beta * B[M * col + row];
+  }
 }
+
+int gpu_bp_diff(const double* __restrict__ A, const double* __restrict__ B, double* __restrict__ C, const double alpha, const double beta, const int M, const int N){
+  dim3 block(BLOCK_SIZE, NUM_THREADS/BLOCK_SIZE);
+  const unsigned int grid_x = ceil(M / (float)block.x);
+  const unsigned int grid_y = ceil(N / (float)block.y);
+  dim3 grid(grid_x, grid_y);
+  gpu_bp_diff_kernel<<<grid, block>>>(A, B, C, alpha, beta, M, N);
+}
+
+
+
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -277,15 +369,55 @@ GPU accelerated:
 element wise matrix multiplication
 matrix transpose
 matrix multiplication  
-
-
-
 */
+
+/*
+A: yh - y = diff
+B: A1
+C: dW2
+M: num_classes
+N: num_neurons 
+K: final_process_share 
+*/
+__global__
+void gpu_bp_dW2_kernel(double* A, double* B, double* C, const int M, const int N, const int K){
+    // tiled matrix multiplication
+    int bid_x = blockIdx.x * blockDim.x; // block's x axis within 1 grid
+    int bid_y = blockIdx.y * blockDim.y;
+    int tid_x = threadIdx.x; // thd's x axis within 1 block
+    int tid_y = threadIdx.y;
+    int row = bid_y + tid_y; // global row index == row this thread is in
+    int col = bid_x + tid_x;
+
+    double thread_element_sum = 0.f;
+    
+    __shared__ double s_tile_A[BLOCK_DIM][BLOCK_DIM];
+    __shared__ double s_tile_B[BLOCK_DIM][BLOCK_DIM];
+
+    for (int k = 0; k < K; k += BLOCK_DIM) 
+    {
+        s_tile_A[tid_y][tid_x] = A[ (row * K) + k + tid_x) ]; // global row index + tile_id in this loop + tid
+        s_tile_B[tid_y][tid_x] = B[ (k*BLOCK_DIM + tid_y) * N + col ]; 
+        
+        __syncthreads();
+
+        for (int e = 0; e < BLOCK_DIM; e++) 
+            thread_element_sum += s_tile_A[tid_y][e] * s_tile_B[e][tid_x]; 
+
+	  
+	  __syncthreads();
+    }
+    if (row < M && col < N) {
+      C[row * N + col] = alpha * thread_element_sum + beta * C[row * N + col]; 
+    }
+}
+
 void gpu_bp_dW2(){
-
-
-
-  
+  dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+  const unsigned int grid_x = ceil(M / (float)block.x);
+  const unsigned int grid_y = ceil(N / (float)block.y);
+  dim3 grid(grid_x, grid_y);
+  gpu_bp_dW2_kernel<<<grid, block>>>(A, B, C, alpha, beta, M, N, K);
 }
 
 
@@ -302,6 +434,8 @@ void gpu_bp_dW2(){
 
 /*
 dB2 == arma::sum(diff, 1);
+
+gradient == what is to be row sum. 
 
 GPU accelerated:
 element wise matrix sum reduction into a vector 
@@ -333,9 +467,8 @@ void gpu_bp_db2_kernel(double *input_matrix, double *output_vector, int num_rows
 }
 
 void gpu_bp_db2(double *input_matrix, double *output_vector, int num_rows, int num_cols)){
-  
-  dim3 num_threads(num_rows, 1);
-  dim3 num_blocks(??, ??);
+  dim3 block(BLOCK_SIZE);
+  dim3 grid(ceil(N / (float)block.x));
   gpu_bp_db2_kernel<<< num_blocks, num_threads >>>(input_matrix, output_vector, num_rows, num_cols);
 }
 
@@ -355,8 +488,57 @@ da1 = nn.W[1].t() * diff;
 
 GPU accelerated:
 matrix multiplication  
+
+A: W2
+B: diff
+C: da1
+M: num_neurons
+N: final_process_share
+K: num_classes
 */
-gpu_bp_da1()
+__global__
+void gpu_bp_da1_kernel(double* A, double* B, double* C, const int M, const int N, const int K){
+    // tiled matrix multiplication
+    int bid_x = blockIdx.x * blockDim.x; // block's x axis within 1 grid
+    int bid_y = blockIdx.y * blockDim.y;
+    int tid_x = threadIdx.x; // thd's x axis within 1 block
+    int tid_y = threadIdx.y;
+    int row = bid_y + tid_y; // global row index == row this thread is in
+    int col = bid_x + tid_x;
+
+    double thread_element_sum = 0.f;
+    
+    __shared__ double s_tile_A[BLOCK_DIM][BLOCK_DIM];
+    __shared__ double s_tile_B[BLOCK_DIM][BLOCK_DIM];
+
+    for (int k = 0; k < K; k += BLOCK_DIM) 
+    {
+        s_tile_A[tid_y][tid_x] = A[ (row * K) + k + tid_x) ]; // global row index + tile_id in this loop + tid
+        s_tile_B[tid_y][tid_x] = B[ (k*BLOCK_DIM + tid_y) * N + col ]; 
+        
+        __syncthreads();
+
+        for (int e = 0; e < BLOCK_DIM; e++) 
+            thread_element_sum += s_tile_A[tid_y][e] * s_tile_B[e][tid_x]; 
+
+	  
+	  __syncthreads();
+    }
+    if (row < M && col < N) {
+      C[row * N + col] = alpha * thread_element_sum + beta * C[row * N + col]; 
+    }
+}
+
+void gpu_bp_da1(double* A, double* B, double* C, const int M, const int N, const int K){
+  dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+  const unsigned int grid_x = ceil(M / (float)block.x);
+  const unsigned int grid_y = ceil(N / (float)block.y);
+  dim3 grid(grid_x, grid_y);
+  gpu_bp_da1_kernel<<<grid, block>>>(A, B, C, alpha, beta, M, N, K);
+}
+
+
+
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -369,16 +551,37 @@ gpu_bp_da1()
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 /*
+sigmoid gate
+
 dz1 = da1 % bpcache.a[0] % (1 - bpcache.a[0]);
 
+A: a1
+B: da1
+C: dz1 
 
 GPU accelerated:
 matrix mod
 element wise matrix mod
 
 */
-void gpu_bp_dz1(){
+__global__
+void gpu_bp_dz1_kernel(double* A, double* B, double* C, const int M, const int N){
+  const unsigned int row = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int col = blockIdx.y * blockDim.y + threadIdx.y;
+  if (row < M && col < N) {
+      const unsigned int index = M * col + row;
+      C[index] = 1.0 - A[index];
+      C[index] *= A[index];
+      C[index] *= B[index];
+  }
+}
 
+void gpu_bp_dz1(double* A, double* B, double* C, const int M, const int N){
+  dim3 block(BLOCK_SIZE, NUM_THREADS/BLOCK_SIZE);
+  const unsigned int grid_x = ceil(M / (float)block.x);
+  const unsigned int grid_y = ceil(N / (float)block.y);
+  dim3 grid(grid_x, grid_y);
+  gpu_bp_dz1_kernel<<<grid, block>>>(A, B, C, M, N);
 
 }
 
@@ -397,12 +600,75 @@ void gpu_bp_dz1(){
 
 
 
+
 /*
 dW1 = dz1 * bpcache.X.t() + reg * nn.W[0];
 
+GPU accelerated:
+matrix multiplication  
 
+A: dz1
+B: X
+C: dW1
+M: num_neurons
+N: final_process_share
+K: num_classes
 */
-gpu_bp_dW1()
+__global__
+void gpu_bp_dW1_kernel(double* A, double* B, double* C, const int M, const int N, const int K){
+    // tiled matrix multiplication
+    int bid_x = blockIdx.x * blockDim.x; // block's x axis within 1 grid
+    int bid_y = blockIdx.y * blockDim.y;
+    int tid_x = threadIdx.x; // thd's x axis within 1 block
+    int tid_y = threadIdx.y;
+    int row = bid_y + tid_y; // global row index == row this thread is in
+    int col = bid_x + tid_x;
+
+    double thread_element_sum = 0.f;
+    
+    __shared__ double s_tile_A[BLOCK_DIM][BLOCK_DIM];
+    __shared__ double s_tile_B[BLOCK_DIM][BLOCK_DIM];
+
+    for (int k = 0; k < K; k += BLOCK_DIM) 
+    {
+        s_tile_A[tid_y][tid_x] = A[ (row * K) + k + tid_x) ]; // global row index + tile_id in this loop + tid
+        s_tile_B[tid_y][tid_x] = B[ (k*BLOCK_DIM + tid_y) * N + col ]; 
+        
+        __syncthreads();
+
+        for (int e = 0; e < BLOCK_DIM; e++) 
+            thread_element_sum += s_tile_A[tid_y][e] * s_tile_B[e][tid_x]; 
+
+	  
+	  __syncthreads();
+    }
+    if (row < M && col < N) {
+      C[row * N + col] = alpha * thread_element_sum + beta * C[row * N + col]; 
+    }
+}
+
+void gpu_bp_dW1(double* A, double* B, double* C, const int M, const int N, const int K){
+  dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+  const unsigned int grid_x = ceil(M / (float)block.x);
+  const unsigned int grid_y = ceil(N / (float)block.y);
+  dim3 grid(grid_x, grid_y);
+  gpu_bp_dW1_kernel<<<grid, block>>>(A, B, C, alpha, beta, M, N, K);
+}
+
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+
 
 
 /*
@@ -410,4 +676,63 @@ gpu_bp_dW1()
 db1 = arma::sum(dz1, 1)
 
 */
-gpu_bp_db1()
+__global__
+void gpu_bp_db1_kernel(double *input_matrix, double *output_vector, int num_rows, int num_cols){
+
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  
+  // for loop each row
+  for (uint i = 0; i < num_rows, i ++){
+    // summing each row 
+    for (uint s = num_cols/2; s > 0; s >>= 1){ // s == step
+      if(tid < s){
+        // i * num_cols == index with row we are on since matrix is represented as array
+        output_vector[tid + i * num_cols] += input_matrix[tid + i * num_cols + s];
+      }
+      // wait for all threads to finish summing 1 row
+      __syncthreads();    
+    }
+  }
+}
+
+void gpu_bp_db1(double *input_matrix, double *output_vector, int num_rows, int num_cols)){
+  dim3 block(BLOCK_SIZE);
+  dim3 grid(ceil(N / (float)block.x));
+  gpu_bp_db1_kernel<<< num_blocks, num_threads >>>(input_matrix, output_vector, num_rows, num_cols);
+}
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+/*
+element wise multiplication 
+*/
+
+
+__global__
+void gpu_grad_update_kernel(double* A, double* B, int learning_rate, const int M, const int N){
+  const unsigned int row = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int col = blockIdx.y * blockDim.y + threadIdx.y;
+  if (row < M && col < N) {
+      const unsigned int index = M * col + row;
+      B[index] -= learning_rate * A[index];
+  }
+}
+
+void gpu_grad_update(double* A, double* B, const int M, const int N){
+  dim3 block(BLOCK_SIZE, NUM_THREADS/BLOCK_SIZE);
+  const unsigned int grid_x = ceil(M / (float)block.x);
+  const unsigned int grid_y = ceil(N / (float)block.y);
+  dim3 grid(grid_x, grid_y);
+  gpu_grad_update_kernel<<<grid, block>>>(A, B, M, N);
+}
