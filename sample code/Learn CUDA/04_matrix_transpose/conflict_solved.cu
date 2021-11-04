@@ -127,7 +127,7 @@ int main(void) {
 	cudaMalloc((void **)&d_a, size);
 	cudaMalloc((void **)&d_b, size);
 
-	// Copy inputs to device
+	// CPU to GPU
 	cudaMemcpy(d_a, a, size, cudaMemcpyHostToDevice);
 	cudaMemcpy(d_b, b, size, cudaMemcpyHostToDevice);
 

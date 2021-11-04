@@ -1,5 +1,5 @@
 /*
-review backprop
+review backprop - cs213n
 https://www.youtube.com/watch?v=i94OvYb6noo&t=3868s&ab_channel=AndrejKarpathy 
 
 
@@ -21,6 +21,12 @@ dz1 = da1 % bpcache.a[0] % (1 - bpcache.a[0]);
 matrix multiplication optimize:
 
 
+NOTE: 
+
+for Mac to include <mpi.h>
+https://github.com/openai/baselines/issues/114 
+sudo apt install libopenmpi-dev 
+brew install openmpi 
 
 */
 #include "neural_network.h"
@@ -366,7 +372,7 @@ need to GPU every step in backprop !!!
 
 
 */
-void parallel_feedforward(NeuralNetwork& nn, const arma::Mat<real>& X,
+void gpu_feedforward(NeuralNetwork& nn, const arma::Mat<real>& X,
                  struct cache& cache){
   
   gpu_ff_a1(); // mat mul + signmoid 
@@ -386,7 +392,7 @@ need to GPU every step in backprop !!!
 3. 
 
 */
-void parallel_backprop(NeuralNetwork& nn, const arma::mat& y, double reg,
+void gpu_backprop(NeuralNetwork& nn, const arma::mat& y, double reg,
               const struct cache& bpcache, struct grads& bpgrads){
 
   gpu_bp_diff();
@@ -400,77 +406,306 @@ void parallel_backprop(NeuralNetwork& nn, const arma::mat& y, double reg,
 
 }
 
+void gpu_gradientdescent(){
+
+}
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+
 /*
-
-
-
-
 
 MPI tutorial
 
-https://github.com/CoffeeBeforeArch/practical_parallelism_in_cpp/blob/master/mpi/mpi_hello_synchronize.cpp
+https://github.com/CoffeeBeforeArch/practical_parallelism_in_cpp/blob/master/parallel_algorithms/gaussian_elimination/mpi/naive/gaussian.cpp 
+https://github.com/CoffeeBeforeArch/practical_parallelism_in_cpp/blob/master/parallel_algorithms/gaussian_elimination/mpi/cyclic_striped_mapping/gaussian.cpp 
 stanny 213 lecture 16-18 code
 
+https://mpitutorial.com/tutorials/mpi-scatter-gather-and-allgather/ 
 
 
+identical to MPI_Reduce() withthe exception that it does not need a root process id 
+(since the results are distributed to all processes).
 
 
 
 */
-
-
-
-
-
-
-
 /*
- * TODO
  * Train the neural network nn of rank 0 in parallel. Your MPI implementation
  * should mainly be in this function.
+ * 
+ * MPI procedures:
+ * 1. divide input batches of images n MPI_scatter() 1 batch to each MPI node
+ * 2. GPU compute each batch of images' contribution to W's updates
+ * 3. allreduce() W's updates, broadcast() to all MPI nodes 
+ * 
+ * cudamemcpy procedures
+ * 1. alloc space for host copies of a, b, c and init values
+ * 2. alloc space for device copies of d_a, d_b, d_c
+ * 3. cudamemcpy() host copies to device
+ * 4. pass device copies as GPU function's input
+ * 
+ * overall strategy: 
+ * 1. setup: 
+ *    a. malloc() MPI data + host data + cudaMalloc() device data
+ *      - every data in ML pipeline have 2 copies
+ *        - 1 on CPU
+ *        - 1 on GPU
+ * 
+ *      - MPI data (input on CPU)
+ *        - to store received MPI on CPU
+ *        - divided CPU ML data for each GPU core 
+ *        - inputs for GPU to compute feed_forward(), backprop() 
+ * 
+ *      - GPU/device data (input + output on GPU)
+ *        - GPU data on GPU, controlled via CPU
+ *        - inputs for GPU to compute feed_forward(), backprop() 
+ *        - outputs that GPU passes to CPU
+ * 
+ *      - CPU/host data (output on CPU)
+ *        - GPU data on CPU, controlled via CPU
+ *        - to store output of GPU backprop()
+ * 
+ * 2. for each epoch: 
+ *    a. MPI between CPUs
+ *      - CPU ML data -> divided CPU ML data for each GPU core
+ *      - root ps MPI batches of input images n output classes to non root nodes
+ *    b. cudaMemcpy() CPU to GPU: 
+ *      - divided CPU ML data for each GPU core -> GPU/device data
+ *    c. cudaMemcpy() GPU to CPU: 
+ *      - GPU/device data -> CPU/host data
+ *    d. MPI_Allreduce() at local CPU
+ *      - CPU/host data -> sum of CPU/host data (every node has a copy)
+ *      - allreduce() W's updates, broadcast() to all MPI nodes 
+ *      - i.e. each node sends its CPU to all, while receving all and then sum
+ *    e. run() the same gradient descent at every CPU
+ *      - MPI_Allreduce() copies the same gradients to all ps
+ *      - every ps runs same, so same copy for next epoch
+ * 
+ * 
+ * MPI_Scatterv() vs MPI_Scatter() vs MPI_Bcast()
+ * - MPI_Scatterv() == send diff things of diff sizes to diff ps 
+ * - MPI_Scatter() == send diff things to diff ps 
+ * - MPI_Bcast() == send/receive same thing to diff ps 
+ * 
+ * NOTE:
+ * - both sender n receiver are running the same code
+ *    - root also need do the same work as non root in addition of being root
+ * - every MPI call is sync
+ *    - but could be root as sender, non root as receiver
+ *    - or every MPI node as both sender and receiver 
+ * 
+ * HINT: You can obtain a raw pointer to the memory used by Armadillo Matrices
+     for storing elements in a column major way. Or you can allocate your own
+     array memory space and store the elements in a row major way. Remember to
+     update the Armadillo matrices in NeuralNetwork &nn of rank 0 before
+     returning from the function.
+ * 
+ * 
  */
 void parallel_train(NeuralNetwork& nn, const arma::Mat<real>& X,
                     const arma::Mat<real>& y, real learning_rate, real reg,
                     const int epochs, const int batch_size, bool grad_check,
                     int print_every, int debug) {
-  int rank, num_procs;
-  MPI_SAFE_CALL(MPI_Comm_size(MPI_COMM_WORLD, &num_procs));
-  MPI_SAFE_CALL(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
+  int rank, num_procs; // set by bash.sh
+  MPI_SAFE_CALL(MPI_Comm_size(MPI_COMM_WORLD, &num_procs)); // no. of processes
+  MPI_SAFE_CALL(MPI_Comm_rank(MPI_COMM_WORLD, &rank)); // get possess_id / rank
 
-  int N = (rank == 0) ? X.n_cols : 0;
+  /*
+  only root ps knows X's no. of cols ?? 
+  root ps broadcast total no. training samples to non root ps
+  this call is sync, blocking until all ps received N
+
+  https://mpitutorial.com/tutorials/mpi-broadcast-and-collective-communication/ 
+
+  N: payload to send/receive
+  1: size of payload
+  0: receiver/sender process id, 0 == root process
+  */
+  int N = (rank == 0) ? X.n_cols : 0; // N == no. samples 
+  int num_features = nn.H[0];
+  int num_neurons = nn.H[1];
+  int num_classes = nn.H[2];
   MPI_SAFE_CALL(MPI_Bcast(&N, 1, MPI_INT, 0, MPI_COMM_WORLD));
 
   std::ofstream error_file;
   error_file.open("Outputs/CpuGpuDiff.txt");
   int print_flag = 0;
 
-  /* HINT: You can obtain a raw pointer to the memory used by Armadillo Matrices
-     for storing elements in a column major way. Or you can allocate your own
-     array memory space and store the elements in a row major way. Remember to
-     update the Armadillo matrices in NeuralNetwork &nn of rank 0 before
-     returning from the function. */
+  /*
+  1a. malloc() MPI data + host data + cudaMalloc() device data
+  */
 
-  // TODO
+  // MPI data (input on CPU) + CPU host data (output on CPU) -> mostly as placeholder
+  CPUData CPU_data(batch_size, num_features, num_neurons, num_classes);
+  // GPU data (input + output on GPU) -> mostly for control GPU data via CPU
+  GPUData GPU_data(batch_size, num_features, num_neurons, num_classes);
 
-  /* iter is a variable used to manage debugging. It increments in the inner
-     loop and therefore goes from 0 to epochs*num_batches */
-  int iter = 0;
 
+  int iter = 0; // debugging, goes from 0 to epochs*num_batches
   for (int epoch = 0; epoch < epochs; ++epoch) {
-    int num_batches = (N + batch_size - 1) / batch_size;
-
+    int num_batches = (N + batch_size - 1) / batch_size; // N: total training samples
     for (int batch = 0; batch < num_batches; ++batch) {
-      /*
-       * Possible implementation:
-       * 1. subdivide input batch of images and `MPI_scatter()' to each MPI node
-       * 2. compute each sub-batch of images' contribution to network
-       * coefficient updates
-       * 3. reduce the coefficient updates and broadcast to all nodes with
-       * `MPI_Allreduce()'
-       * 4. update local network coefficient at each node
-       */
 
-      // TODO
+      /*
+      2a. root ps divides batches of input images to MPI nodes
+
+      this call is sync !!!!!!!
+      every process blocked until root ps finished "scattering" to all ps
+
+      TODO: 
+      MPI_Scatterv()
+      https://www.mpi-forum.org/docs/mpi-1.1/mpi-11-html/node72.html 
+      MPI_Scatter() can only send same size data
+
+      1. starting ptr of matrix root ps to scatter to all ps
+      2. send_counts, send length, sub matrix each process is assigned (N * no. of rows) 
+      3. displacement/stride 
+
+      NOTE:
+      1st batch sent to root, then for loop 2nd to 2nd ps, 3rd to 3rd ps etc. 
+
+      */
+     
+     int batch_index = batch * batch_size; // 4 GPU core can only deal w portion of batch each loop
+     int process_share = batch_size/num_procs; // depending no. of process, each ps might compute many batches
+     int last_process_share = (N - batch_index)/num_procs; // last ps likely get less share of work
+     int final_process_share = std::min(process_share, last_process_share); 
+     
+      MPI_SAFE_CALL(
+          MPI_Scatter( 
+              X.colptr(batch_index), /* start of matrix to send. */ // memptr() ?? 
+              num_features * final_process_share, /* send length */
+              MPI_DOUBLE,
+              CPU_data.X, /* start of matrix to receive */
+              num_features * final_process_share, /* receive length */
+              MPI_DOUBLE,
+              0, /* from root to other ps */
+              MPI_COMM_WORLD
+      ));
+
+
+      MPI_SAFE_CALL(
+          MPI_Scatter( 
+              y.colptr(batch_index), /* start of matrix to send. */ // memptr() ?? 
+              num_features * final_process_share, /* send length */
+              MPI_DOUBLE,
+              CPU_data.y, /* start of matrix to receive */
+              num_features * final_process_share, /* receive length */
+              MPI_DOUBLE,
+              0, /* from root to other ps */
+              MPI_COMM_WORLD
+      ));
+
+
+      /*
+      2b. cudaMemcpy() CPU to GPU 
+      
+      GPU compute feedforward()
+      GPU compute backprop()
+
+      2c. cudaMemcpy() GPU to CPU       
+      */
+      checkCudaErrors(cudaMemcpy(GPU_data.X, CPU_data.X, sizeof(double) * num_features * final_process_share, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(GPU_data.y, CPU_data.y, sizeof(double) * num_classes * final_process_share, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(GPU_data.W1, nn.W[0].memptr(), sizeof(double) * num_features * num_neurons, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(GPU_data.b1, nn.b[0].memptr(), sizeof(double) * num_neurons, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(GPU_data.W2, nn.W[1].memptr(), sizeof(double) * num_neurons * num_classes, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(GPU_data.b2, nn.b[1].memptr(), sizeof(double) * num_classes, cudaMemcpyHostToDevice));
+
+      gpu_feedforward(GPU_data, final_process_share, nn);
+
+      gpu_backprop(GPU_data, final_process_share, reg, nn, num_procs);
+
+      // GPU to CPU
+      checkCudaErrors(cudaMemcpy(CPU_data.dW1, GPU_data.dW1, sizeof(double) * num_features * num_neurons, cudaMemcpyDeviceToHost));
+      checkCudaErrors(cudaMemcpy(CPU_data.db1, GPU_data.db1, sizeof(double) * num_neurons, cudaMemcpyDeviceToHost));
+      checkCudaErrors(cudaMemcpy(CPU_data.dW2, GPU_data.dW2, sizeof(double) * num_neurons * num_classes, cudaMemcpyDeviceToHost));
+      checkCudaErrors(cudaMemcpy(CPU_data.db2, GPU_data.db2, sizeof(double) * num_classes, cudaMemcpyDeviceToHost));
+
+
+      /* 
+      2d. MPI_Allreduce() at local CPU 
+      
+      MPI_Allreduce()
+      https://mpitutorial.com/tutorials/mpi-reduce-and-allreduce/ 
+      https://www.mpi-forum.org/docs/mpi-2.2/mpi22-report/node109.htm 
+      */
+      MPI_SAFE_CALL(
+          // MPI_Allreduce == MPI_reduce + MPI_broadcast 
+          // every node is a root
+          MPI_Allreduce( 
+              CPU_data.dW1, /* start addr of send buffer */
+              CPU_data.dW1_reduced, /* start addr of receive buffer */
+              (num_features * num_neurons), /* send count */
+              MPI_DOUBLE,
+              MPI_SUM, /* summing */
+              MPI_COMM_WORLD
+      ));
+      MPI_SAFE_CALL(
+          MPI_Allreduce(
+              CPU_data.db1,
+              CPU_data.db1_reduced,
+              (num_neurons),
+              MPI_DOUBLE,
+              MPI_SUM,
+              MPI_COMM_WORLD
+      ));
+      MPI_SAFE_CALL(
+          MPI_Allreduce(
+              CPU_data.dW2,
+              CPU_data.dW2_reduced,
+              (num_neurons * num_classes),
+              MPI_DOUBLE,
+              MPI_SUM,
+              MPI_COMM_WORLD
+      ));
+      MPI_SAFE_CALL(
+          MPI_Allreduce(
+              CPU_data.db2,
+              CPU_data.db2_reduced,
+              (num_classes),
+              MPI_DOUBLE,
+              MPI_SUM,
+              MPI_COMM_WORLD
+      ));
+
+
+      /* 
+      Q: 4 GPU cores duplicately compute, then independently update each copy of nn
+      == theoractically seems quicker than compute in CPU 
+      or 1 core compute then MPI to other ps ?? 
+
+
+      2e. cudaMemcpy() CPU to GPU 
+
+      GPU compute gradient descent each time 4 
+
+      2f. cudaMemcpy() GPU to CPU 
+      */
+
+      checkCudaErrors(cudaMemcpy(GPU_data.dW1, CPU_data.dW1_reduced, sizeof(double) * num_features * num_neurons, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(GPU_data.db1, CPU_data.db1_reduced, sizeof(double) * num_neurons, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(GPU_data.dW2, CPU_data.dW2_reduced, sizeof(double) * num_neurons * num_classes, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(GPU_data.db2, CPU_data.db2_reduced, sizeof(double) * num_classes, cudaMemcpyHostToDevice));
+
+      gpu_gradientdescent(GPU_data, learning_rate);
+
+      checkCudaErrors(cudaMemcpy(nn.W[0].memptr(), GPU_data.W1, sizeof(double) * num_features * num_neurons, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(nn.b[0].memptr(), GPU_data.b1, sizeof(double) * num_neurons, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(nn.W[1].memptr(), GPU_data.W2, sizeof(double) * num_neurons * num_classes, cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(nn.b[1].memptr(), GPU_data.b2, sizeof(double) * num_classes, cudaMemcpyHostToDevice));
+
 
       // +-*=+-*=+-*=+-*=+-*=+-*=+-*=+-*=+*-=+-*=+*-=+-*=+-*=+-*=+-*=+-*= //
       //                    POST-PROCESS OPTIONS                          //
